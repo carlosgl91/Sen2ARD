@@ -1,4 +1,4 @@
-# Sen2TimeSeriesARD
+# Sen2ARD
 
 ## Index
 
