@@ -1,0 +1,76 @@
+{
+  "title": "Sen2ARD: Herramienta de procesamiento y generación de Datos Listos para el Análisis (ARD) de Sentinel-2 en Google Earth Engine",
+  "description": "Sen2ARD is an open-source application based on Google Earth Engine (GEE) designed to automate the preprocessing, temporal analysis, and download of Analysis Ready Data (ARD) from the Sentinel-2 Surface Reflectance (SR) collection. This tool was developed within the framework of the research project PINV01-528, supported by CONACYT (Paraguay).",
+  "upload_type": "software",
+  "access_right": "open",
+  "creators": [
+    {
+      "name": "Giménez, Carlos",
+      "affiliation": "Facultad Politécnica, Universidad Nacional de Asunción, San Lorenzo 111421, Paraguay"
+    },
+    {
+      "name": "Salgueiro Romero, Luis Fernando",
+      "affiliation": "Facultad Politécnica, Universidad Nacional de Asunción, San Lorenzo 111421, Paraguay"
+    },
+    {
+      "name": "Mello-Román, Julio César",
+      "affiliation": "Facultad Politécnica, Universidad Nacional de Asunción, San Lorenzo 111421, Paraguay"
+    },
+    {
+      "name": "de la Sancha, Noé U.",
+      "affiliation": "Department of Environmental Science and Studies, DePaul University, Chicago, IL, USA"
+    },
+    {
+      "name": "Perea, Santiago",
+      "affiliation": "The Nelson Institute for Environmental Studies & The Department of Forest & Wildlife Ecology, University of Wisconsin-Madison, WI, USA"
+    },
+    {
+      "name": "Gómez, Diego D.",
+      "affiliation": "Servicio Nacional de Erradicación del Paludismo, Ministerio de Salud Pública y Bienestar Social, Paraguay"
+    },
+    {
+      "name": "Mongelós, Oscar",
+      "affiliation": "Servicio Nacional de Erradicación del Paludismo, Ministerio de Salud Pública y Bienestar Social, Paraguay"
+    },
+    {
+      "name": "Ibarrola-Vannucci, Ana K",
+      "affiliation": "Servicio Nacional de Erradicación del Paludismo, Ministerio de Salud Pública y Bienestar Social, Paraguay; Instituto Nacional de Salud, Ministerio de Salud Pública y Bienestar Social, Paraguay"
+    },
+    {
+      "name": "Gutiérrez, María de los Ángeles",
+      "affiliation": "Servicio Nacional de Erradicación del Paludismo, Ministerio de Salud Pública y Bienestar Social, Paraguay"
+    },
+    {
+      "name": "Cabral, Juan C.",
+      "affiliation": "Facultad Politécnica, Universidad Nacional de Asunción, San Lorenzo 111421, Paraguay"
+    },
+    {
+      "name": "Mello-Román, Jorge Daniel",
+      "affiliation": "Facultad de Ciencias Exactas y Tecnológicas, Universidad Nacional de Concepción, Concepción, Paraguay"
+    },
+    {
+      "name": "Aguirre-Ríos, Verónica Sofía",
+      "affiliation": "Facultad Politécnica, Universidad Nacional de Asunción, San Lorenzo 111421, Paraguay"
+    },
+    {
+      "name": "Parra, Cristhian",
+      "affiliation": "Programa de las Naciones Unidas para el Desarrollo (PNUD)"
+    },
+    {
+      "name": "García-Torres, Miguel",
+      "affiliation": "Data Science and Big Data Lab, Universidad Pablo de Olavide, ES-41013 Seville, Spain"
+    },
+    {
+      "name": "Montiel, José",
+      "affiliation": "Servicio Nacional de Erradicación del Paludismo, Ministerio de Salud Pública y Bienestar Social, Paraguay"
+    },
+    {
+      "name": "Velázquez, Myriam Celeste",
+      "affiliation": "Investigación y Conservación, Fundación Moisés Bertoni, Arguello 208, Asunción 1255, Paraguay"
+    },
+    {
+      "name": "Pérez-Estigarribia, Pastor E",
+      "affiliation": "Facultad Politécnica, Universidad Nacional de Asunción, San Lorenzo 111421, Paraguay; Facultad de Ciencias de la Salud, Universidad Sudamericana, Pedro Juan Caballero, Paraguay"
+    }
+  ]
+}
