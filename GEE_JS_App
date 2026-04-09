@@ -30,7 +30,11 @@
  *    1.1.6 - CG Added Cloud and shadows processing (Removals and void filling)
  *    1.1.7 - CG Variables selection
  *    1.1.7 - CG Reporting function for each time aggregation type
- *    1.1.8 - CG Main map raster identification by aggregation type 
+ *    1.1.8 - CG Main map raster identification by aggregation type
+ *    2     - CG Added s2cloudless procedure
+ *          - CG Added s2cloudless parametrization
+ *          - CG Added cloud and shadow bands
+ *          - CG Added image count per period band
  * 
  * @see
  * 
@@ -76,6 +80,12 @@ var App = {
   
   selected_vars:[],
   selectedVars:null,
+  // Parameters for cloud and shodow masking
+  clouds_shadows_params:{
+    CLOUD_PROB_THRESHOLD: 50,
+    NIR_DARK_THRESHOLD: 0.15,
+    CLOUD_PROJECTION_DIST: 50
+  },
   //iso_weeks report data
   r_total_iso_weeks_in_range:null,
   r_iso_weeks_with_data:null,
@@ -532,41 +542,60 @@ var App = {
  * @return {ee.ImageCollection} A new collection with clouds masked and voids filled.
  */
  
-  applyCloudMaskAndFillVoids: function(imageCollection) {
+  applyCloudMaskAndFillVoids: function(imageCollection,originalCollection) {
       
               var analysisType = App.selectedTimeAggregation;
-            
+              
+              App.ui.forms.updateMessage("Aplicando máscara de nubes y sombras...", false);
+              print("Aplicando máscara de nubes y sombras...")
               // Step 1: Apply the cloud mask to every image in the collection.
-              var maskedCollection = imageCollection.map(App.cloudMask);
+              var maskedCollection = imageCollection.map(App.maskCloudsAndShadows);
             
-              App.ui.forms.updateMessage("Cloud masking complete. Filling voids...", false);
-            
+              App.ui.forms.updateMessage("Enmascarado completo. Rellenando vacíos...", false);
+              print("Enmascarado completo. Rellenando vacíos...")
               // Step 2: Fill the voids based on the selected analysis type.
               if (analysisType === 'Periodo Completo') {
             // For the full period, create one median composite from the ENTIRE original collection to fill gaps.
-            var medianFiller = imageCollection.median();
+            var medianFiller = originalCollection.median();
         
             var filledCollection = maskedCollection.map(function(image) {
-                // Replace masked pixels in each image with the value from the period's median composite.
-                return image.unmask(medianFiller).copyProperties(image, image.propertyNames());
+              
+              var fillerBands = medianFiller.bandNames();
+              // 2. Select only the data bands from the masked image and fill them.
+              var dataBandsFilled = image.select(fillerBands).unmask(medianFiller);
+              
+              // 3. Select the two extra mask bands that were temporarily removed.
+              var maskBands = image.select(['cloud_mask', 'shadow_mask']);
+              
+              // 4. Add the mask bands back to the filled image and copy properties.
+              return dataBandsFilled.addBands(maskBands)
+                                    .copyProperties(image, image.propertyNames());
             });
             return filledCollection;
         
-        } else if (analysisType === 'Trimestral') {
+        } else if (analysisType === 'Trimestral' || analysisType === 'Semanas ISO') {
             // For quarterly analysis, fill gaps using the median of the respective quarter.
             var uniqueQuarters = ee.List(imageCollection.aggregate_array('quarter_year')).distinct();
         
             var filledByQuarter = uniqueQuarters.map(function(quarter_year) {
                 // Create the median composite for this specific quarter from the ORIGINAL collection.
-                var quarterMedianFiller = imageCollection
+                var groupMedianFiller = originalCollection
                     .filter(ee.Filter.eq('quarter_year', quarter_year))
                     .median();
         
                 // Filter the MASKED collection and fill the voids for all images in this quarter.
                 var filledImages = maskedCollection
                     .filter(ee.Filter.eq('quarter_year', quarter_year))
-                    .map(function(image) {
-                        return image.unmask(quarterMedianFiller).copyProperties(image, image.propertyNames());
+                    .map(function(image) {// Get the band names from the filler image.
+                    
+                    var fillerBands = groupMedianFiller.bandNames();
+                     // Select only the data bands from the masked image and fill them.
+                    var dataBandsFilled = image.select(fillerBands).unmask(groupMedianFiller);
+                    // Select the two extra mask bands.
+                    var maskBands = image.select(['cloud_mask', 'shadow_mask']);
+                    // Add the mask bands back to the filled image.
+                    return dataBandsFilled.addBands(maskBands)
+                        .copyProperties(image, image.propertyNames());
                     });
                 return filledImages;
             });
@@ -574,42 +603,78 @@ var App = {
             // The result is a list of ImageCollections. Flatten it into a single ImageCollection.
             return ee.ImageCollection(ee.FeatureCollection(filledByQuarter).flatten());
         
-        } else if (analysisType === 'Semanas ISO') {
-            // For ISO week analysis, efficiently fill gaps using the median of the corresponding quarter.
-            
-            // 1. Get a list of all unique quarters in the collection.
-            var uniqueQuarters = ee.List(imageCollection.aggregate_array('quarter_year')).distinct();
-            
-            // 2. Iterate over each unique quarter.
-            var filledByQuarter = uniqueQuarters.map(function(quarter_year) {
-                
-                // 3. Calculate the median filler for this quarter just ONCE.
-                var quarterMedianFiller = imageCollection
-                    .filter(ee.Filter.eq('quarter_year', quarter_year))
-                    .median();
-                
-                // 4. Filter the MASKED collection to get all images belonging to this quarter.
-                var imagesInQuarter = maskedCollection.filter(ee.Filter.eq('quarter_year', quarter_year));
-                
-                // 5. Map over this smaller, quarter-specific collection and fill the voids.
-                var filledImages = imagesInQuarter.map(function(image) {
-                    return image.unmask(quarterMedianFiller).copyProperties(image, image.propertyNames());
-                });
-                
-                // You can print inside the loop if you need to debug a specific quarter
-                // print('Images filled for quarter: ' + quarter_year, filledImages);
-                
-                return filledImages;
-            });
-            
-            // 6. The result is a list of ImageCollections. Flatten it into a single collection.
-            return ee.ImageCollection(ee.FeatureCollection(filledByQuarter).flatten());
-                
         } else {
             // If no matching analysis type, just return the masked collection with no filling.
             return maskedCollection;
         }
     },
+ 
+  //Combines two image collectios by a common id  
+  indexJoin: function(collectionA, collectionB, propertyName) {
+    var joined = ee.ImageCollection(ee.Join.saveFirst(propertyName).apply({
+      primary: collectionA,
+      secondary: collectionB,
+      condition: ee.Filter.equals({
+        leftField: 'system:index',
+        rightField: 'system:index'
+      })
+    }));
+    // Mapea sobre la colección unida para simplificar la estructura.
+    return joined.map(function(image) {
+      var secondaryImage = ee.Image(image.get(propertyName));
+      // Añade la imagen secundaria como una propiedad para fácil acceso.
+      return image.set(propertyName, secondaryImage);
+    });
+  },
+  /**
+   * Enmascara nubes y sombras usando S2 cloud probability y SCL.
+   */
+  maskCloudsAndShadows: function(image) {
+    
+    // Obtiene la probabilidad de nubes y la clasificación de escena (SCL)
+    var cloudProb = ee.Image(image.get('cloud_prob')).select('probability');
+    var scl = image.select('SCL');
+  
+    // Condición para clases de nubes y sombras válidas en la SCL
+    var validCloudSCL = scl.eq(8).or(scl.eq(9)).or(scl.eq(10));
+    var cloudShadowsSCL = scl.eq(3);
+  
+    // Crea y dilata la máscara de nubes usando el umbral de la UI
+    var cloudMask = cloudProb.gt(App.clouds_shadows_params.CLOUD_PROB_THRESHOLD).or(validCloudSCL);
+    var cloudMaskDilated = cloudMask.focal_max(1);
+  
+    // Excluye el agua del enmascaramiento de sombras
+    var notWater = scl.neq(6);
+  
+    // Proyecta las sombras de las nubes
+    var azimuth = ee.Number(image.get('MEAN_SOLAR_AZIMUTH_ANGLE'));
+
+    var shadowAzimuth = azimuth.subtract(90);
+    
+    var shadowProjection = cloudMaskDilated
+      .directionalDistanceTransform(shadowAzimuth, App.clouds_shadows_params.CLOUD_PROJECTION_DIST)
+      .reproject({crs: image.select('B8').projection(), scale: 10})
+      .select('distance');
+  
+    // Identifica píxeles oscuros (sombras), evitando el agua
+    var darkPixels = image.select('B8').lt(App.clouds_shadows_params.NIR_DARK_THRESHOLD).and(notWater);
+    var ndvi = image.normalizedDifference(['B8', 'B4']);
+
+    var shadowMask = shadowProjection.mask().and(darkPixels).and(ndvi.lt(0.4))
+    shadowMask = shadowMask.or(cloudShadowsSCL)
+    // Combina la máscara de nubes y sombras
+    var combinedMask = cloudMaskDilated.or(shadowMask)
+  
+    // Crea bandas binarias para diagnóstico o uso posterior
+    var final_cloud_mask = cloudMaskDilated.rename('cloud_mask').uint8();
+    var final_shadow_mask = shadowMask.rename('shadow_mask').uint8();
+  
+    // Aplica la máscara (invirtiéndola) a la imagen y añade las bandas de máscara
+    return image.updateMask(combinedMask.not())
+      .addBands(final_cloud_mask)
+      .addBands(final_shadow_mask)
+      .copyProperties(image, image.propertyNames());
+  },
 
   addIndices: function (image) {
   var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI').toFloat();
@@ -678,8 +743,16 @@ var App = {
   var startDate = ee.Date(quarterCollection.first().get('system:time_start'));
   var endDate = ee.Date(quarterCollection.sort('system:time_start', false).first().get('system:time_start'));
   var quarter = quarterCollection.first().get('quarter')
+  
+  // 1. Crea una banda resumen de todas las máscaras de nubes de la colección
+  var cloudMaskSummary = quarterCollection.select('cloud_mask')
+    .reduce(ee.Reducer.sum())
+    .rename('cloud_mask_summary').toFloat();
 
- 
+  // 2. Crea una banda resumen de todas las máscaras de sombras de la colección
+  var shadowMaskSummary = quarterCollection.select('shadow_mask')
+    .reduce(ee.Reducer.sum())
+    .rename('shadow_mask_summary').toFloat();
 
   var meanImage = quarterCollection.mean()
     .toFloat()
@@ -710,11 +783,17 @@ var App = {
     .rename(quarterCollection.first().bandNames().map(function (band) {
       return ee.String(band).cat('_stdDev');
     }));
+    
+  var countImages = quarterCollection.select('B4').count().rename('pixel_count').toFloat();
+
 
   var combinedImage = meanImage.addBands(medianImage)
                               .addBands(minImage)
                               .addBands(maxImage)
                               .addBands(stdDevImage)
+                              .addBands(cloudMaskSummary)
+                              .addBands(shadowMaskSummary)
+                              .addBands(countImages)
                               .set('quarter', quarter)////
                               .set('quarter_year', quarter_year)
                               .set('start_date', startDate.format('YYYY-MM-dd'))
@@ -730,7 +809,7 @@ var App = {
   // Esta función obtiene las estadisticas básicas de la colección para cada isoweek
   // Here it is important to have in mind that, when multiple years, the function could produce one image per week instead  
   // of one image per week and year. So we should add a year property for the filter
-    getWeeklyStatistics: function (isoWeekYear, collection) {
+  getWeeklyStatistics: function (isoWeekYear, collection) {
       // Filtra la colección para obtener solo las imágenes de la semana y año específicos.
       var weekCollection = collection.filter(ee.Filter.eq('isoWeek_year', isoWeekYear));
       var imageCount = weekCollection.size();
@@ -770,11 +849,27 @@ var App = {
           .rename(weekCollection.first().bandNames().map(function (band) {
               return ee.String(band).cat('_stdDev');
           }));
+          
+          
+      // 1. Crea una banda resumen de todas las máscaras de nubes de la colección
+      var cloudMaskSummary = weekCollection.select('cloud_mask')
+      .reduce(ee.Reducer.sum())
+      .rename('cloud_mask_summary').toFloat();
+
+      // 2. Crea una banda resumen de todas las máscaras de sombras de la colección
+      var shadowMaskSummary = weekCollection.select('shadow_mask')
+      .reduce(ee.Reducer.sum())
+      .rename('shadow_mask_summary').toFloat();
+      
+      var countImages = weekCollection.select('B4').count().rename('pixel_count').toFloat();
   
       var combinedImage = meanImage.addBands(medianImage)
           .addBands(minImage)
           .addBands(maxImage)
           .addBands(stdDevImage)
+          .addBands(cloudMaskSummary)
+          .addBands(shadowMaskSummary)
+          .addBands(countImages)
           .set('iso_week', isoWeek) // Se añade la propiedad para la exportación.
           .set('isoWeek_year', isoWeekYear) // Se añade el identificador único.
           .set('start_date', startDate.format('YYYY-MM-dd'))
@@ -876,6 +971,16 @@ var App = {
         var imageCount = periodCollection.size();
         var startDate = ee.Date(periodCollection.first().get('system:time_start'));
         var endDate = ee.Date(periodCollection.sort('system:time_start', false).first().get('system:time_start'));
+        
+        // 1. Crea una banda resumen de todas las máscaras de nubes de la colección
+        var cloudMaskSummary = periodCollection.select('cloud_mask')
+          .reduce(ee.Reducer.sum())
+          .rename('cloud_mask_summary').toFloat();
+    
+        // 2. Crea una banda resumen de todas las máscaras de sombras de la colección
+        var shadowMaskSummary = periodCollection.select('shadow_mask')
+          .reduce(ee.Reducer.sum())
+          .rename('shadow_mask_summary').toFloat();
   
     
         // Proceed with existing statistics computation
@@ -908,11 +1013,17 @@ var App = {
             .rename(periodCollection.first().bandNames().map(function (band) {
               return ee.String(band).cat('_stdDev');
             }));
+            
+        var countImages = periodCollection.select('B4').count().rename('pixel_count').toFloat();
+
     
         var combinedImage = meanImage.addBands(medianImage)
                                     .addBands(minImage)
                                     .addBands(maxImage)
                                     .addBands(stdDevImage)
+                                    .addBands(cloudMaskSummary)
+                                    .addBands(shadowMaskSummary)
+                                    .addBands(countImages)
                                     .set('start_date', startDate.format('YYYY-MM-dd'))
                                     .set('end_date', endDate.format('YYYY-MM-dd'))
                                     .set('image_count', imageCount)
@@ -948,46 +1059,46 @@ var App = {
    * Pulls every image in an ee.ImageCollection to the client
    * and adds it to the map with simple RGB viz.
    */
-      displayMedianComposites: function(collection) {
-        App.ui.forms.mainPanel_Map.layers().reset();
-    
-        if (App.aoi) {
-            App.ui.forms.mainPanel_Map.addLayer(App.aoi, { color: 'FF0000' }, "AOI", true, 0.5);
+  displayMedianComposites: function(collection) {
+    App.ui.forms.mainPanel_Map.layers().reset();
+
+    if (App.aoi) {
+        App.ui.forms.mainPanel_Map.addLayer(App.aoi, { color: 'FF0000' }, "AOI", true, 0.5);
+    }
+
+    // Convierte a lista solo para obtener los IDs y propiedades
+    collection.toList(collection.size()).evaluate(function(imageList) {
+        if (!imageList || imageList.length === 0) {
+            App.ui.forms.updateMessage("No hay imágenes para mostrar.", true);
+            return;
         }
-    
-        // Convierte a lista solo para obtener los IDs y propiedades
-        collection.toList(collection.size()).evaluate(function(imageList) {
-            if (!imageList || imageList.length === 0) {
-                App.ui.forms.updateMessage("No hay imágenes para mostrar.", true);
-                return;
+
+        imageList.forEach(function(imageData) {
+            var props = imageData.properties;
+            // Recupera la imagen **directamente de la colección original usando su ID**
+            var image = collection.filter(ee.Filter.eq('system:index', imageData.properties['system:index'])).first();
+            // Construye el nombre de la capa
+            var name;
+            if (App.selectedTimeAggregation === 'Trimestral') {
+                var parts = props.quarter_year.split('_');
+                name = 'Median_Q' + parts[1] + '_' + parts[0];
+            } else if (App.selectedTimeAggregation === 'Semanas ISO') {
+                var parts = props.isoWeek_year.split('_');
+                name = 'Median_W' + parts[1] + '_' + parts[0];
+            } else if (App.selectedTimeAggregation === 'Periodo Completo') {
+                name = 'Median_FP' + props.start_date + '_to_' + props.end_date;
+            } else {
+                name = 'Median_' + props['system:index'];
             }
-    
-            imageList.forEach(function(imageData) {
-                var props = imageData.properties;
-                // Recupera la imagen **directamente de la colección original usando su ID**
-                var image = collection.filter(ee.Filter.eq('system:index', imageData.properties['system:index'])).first();
-                // Construye el nombre de la capa
-                var name;
-                if (App.selectedTimeAggregation === 'Trimestral') {
-                    var parts = props.quarter_year.split('_');
-                    name = 'Median_Q' + parts[1] + '_' + parts[0];
-                } else if (App.selectedTimeAggregation === 'Semanas ISO') {
-                    var parts = props.isoWeek_year.split('_');
-                    name = 'Median_W' + parts[1] + '_' + parts[0];
-                } else if (App.selectedTimeAggregation === 'Periodo Completo') {
-                    name = 'Median_FP' + props.start_date + '_to_' + props.end_date;
-                } else {
-                    name = 'Median_' + props['system:index'];
-                }
-    
-                var viz = { min: 0, max: 0.3 };
-                var rgbImage = image.select(['B4_median', 'B3_median', 'B2_median']);
-                App.ui.forms.mainPanel_Map.addLayer(rgbImage, viz, name);
-            });
-    
-            App.ui.forms.mainPanel_Map.centerObject(App.aoi);
+
+            var viz = { min: 0, max: 0.3 };
+            var rgbImage = image.select(['B4_median', 'B3_median', 'B2_median']);
+            App.ui.forms.mainPanel_Map.addLayer(rgbImage, viz, name);
         });
-    },
+
+        App.ui.forms.mainPanel_Map.centerObject(App.aoi);
+    });
+  },
   
   // Populate the vars panel
   
@@ -1049,6 +1160,49 @@ var App = {
     print(derivedNames,"Objeto de variables a descargar")
     return derivedNames; // Returns ['NDVI_mean', 'NDVI_median', ...]
 },
+
+  createFullYearCollection: function(startDate, endDate, aoi, cloudCoverValue) {
+  // 1. Convierte las fechas de entrada a objetos ee.Date y obtiene los años.
+  var start = ee.Date(startDate);
+  var end = ee.Date(endDate);
+  var startYear = start.get('year');
+  var endYear = end.get('year');
+
+  // 2. Crea una lista de números enteros para cada año en el rango.
+  var years = ee.List.sequence(startYear, endYear);
+
+  // 3. Itera sobre la lista de años para construir la colección final.
+  //    Se usa .iterate() porque es la forma eficiente en GEE de combinar
+  //    múltiples colecciones en una sola del lado del servidor.
+  
+  // Se define una colección vacía como punto de partida para la iteración.
+  var initialCollection = ee.ImageCollection([]);
+
+  // La función que se ejecutará para cada año en la lista.
+  var accumulate = function(year, collection) {
+    // Se convierten las entradas a los tipos correctos para GEE.
+    var currentCollection = ee.ImageCollection(collection);
+    var currentYear = ee.Number(year);
+    
+    // Define el rango de fechas para el año completo actual.
+    var yearStartDate = ee.Date.fromYMD(currentYear, 1, 1);
+    var yearEndDate = ee.Date.fromYMD(currentYear, 12, 31);
+
+    // Filtra la colección de Sentinel-2 para el año completo actual.
+    var yearlyCollection = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+      .filterBounds(aoi)
+      .filterDate(yearStartDate, yearEndDate)
+      .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', cloudCoverValue));
+      
+    // Combina la colección acumulada con la del año actual.
+    return currentCollection.merge(yearlyCollection);
+  };
+
+  // 4. Ejecuta la iteración y convierte el resultado final en una ImageCollection.
+  var mergedCollection = ee.ImageCollection(years.iterate(accumulate, initialCollection));
+
+  return mergedCollection;
+},
   //getDerivedBandName_serverside: function(selectedBaseVars) {
   //  var derivedNames = ee.List([]); // Start with an empty server-side list
   //  var stats = ['_mean', '_median', '_min', '_max', '_stdDev'];
@@ -1097,6 +1251,12 @@ var App = {
         this.controlPanel.add(this.textBox_Period_end);
         this.controlPanel.add(this.label_cloudCover);
         this.controlPanel.add(this.slider_cloudCover);
+        // Now editing
+        this.controlPanel.add(this.checkbox_advancedMasking);
+        this.controlPanel.add(this.panel_advancedMasking);
+
+         
+         
         this.controlPanel.add(this.label_timeAggregation);
         this.controlPanel.add(this.select_timeAggregation);
         this.controlPanel.add(this.label_available_vars);
@@ -1147,7 +1307,7 @@ var App = {
         App.ui.forms.messageLabel.style().set({ color: color });
       },
       label_ToolTitle: ui.Label({
-        value: 'Sen2TimeSeriesARD',
+        value: 'Sen2ARD',
         style: { fontSize: '25px', color: '#8b8b8b',textAlign: 'center'}
       }),
       label_aoi: ui.Label({
@@ -1201,7 +1361,7 @@ var App = {
       label_propertyID: ui.Label({value:'Especifique el ID del área de interés (asset)', style:{'fontWeight': 'bold'}}),
       textBox_propertyAssetID: ui.Textbox({
         placeholder: 'Especifique ID de la tabla',
-        value: 'projects/ee-lc-monitoring/assets/proyecto_pinv530/limites_asuncion',
+        value: 'projects/ee-lc-monitoring/assets/tpd_area',
         style:{'width':'320px'}
       }),
       button_uploadBoundary: ui.Button("Cargar límites", function () {
@@ -1357,20 +1517,35 @@ var App = {
             //--------------------------------------------Processing---------------------------------------------    
             //---------------------------------------------------------------------------------------------------  
             
-            var imageCollection = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-              .filterDate(startDate, endDate)
-              .filterBounds(App.aoi)
-              .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', cloudCoverValue))
-              .select(['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B9',  'B11', 'B12',"QA60"])
-              .map(App.addQuarterAndIsoWeek)
-              .map(s2_tools.rescaleBands)
+             // 1. Cargar la colección S2 SR (ahora incluyendo SCL y ángulos solares)
+            var s2SrCollection = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+            .filterDate(startDate, endDate)
+            .filterBounds(App.aoi)
+            .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', cloudCoverValue));
               
-            // Collection for gap filling 
-            var imageColl_voidfilling =  imageCollection
+            // 2. Cargar la colección de probabilidad de nubes
+            var s2CloudProbCollection = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
+            .filterDate(startDate, endDate)
+            .filterBounds(App.aoi);
             
-            // Store the filtered collection for   
+            // 3. Unir las dos colecciones usando la nueva función
+            var joinedCollection = App.indexJoin(s2SrCollection, s2CloudProbCollection, 'cloud_prob');
+            
+            // 4. Aplicar pre-procesamiento (reescalado, añadir fechas, etc.)
+            var preprocessedCollection = joinedCollection
+            .map(App.addQuarterAndIsoWeek)
+            .map(s2_tools.rescaleBands);
 
-            App.Image_Col_to_process = imageCollection
+            // Guardamos la colección original SIN MÁSCARA para usarla en el relleno de vacíos
+            var CollectionForFilling = App.createFullYearCollection(startDate, endDate,App.aoi, cloudCoverValue)
+            .map(App.addQuarterAndIsoWeek)
+            .map(s2_tools.rescaleBands);
+            
+            print("Collection to print",CollectionForFilling)
+            
+            App.Image_Col_to_process = preprocessedCollection;
+            
+            
             // Only count ISO weeks if the selected time aggregation is "Semanas ISO"
             if (analysisType === 'Semanas ISO') {
               // This is just informative and will produce and store counts about the disponibility of 
@@ -1378,13 +1553,13 @@ var App = {
               App.countIsoWeeks(startDate, endDate, imageCollection);
             }
       
-            var count = imageCollection.size();
-           App.report.img_count_total = count
-           App.report.img_count_quarters = imageCollection.aggregate_array('quarter_year').distinct().sort()
-           App.report.img_count_months = imageCollection.aggregate_array('yearMonth').distinct().sort();
-           App.report.img_count_iso_weeks = imageCollection.sort('date').aggregate_array('isoWeek_year').distinct();
+            var count = preprocessedCollection.size();
+             App.report.img_count_total = count
+             App.report.img_count_quarters = preprocessedCollection.aggregate_array('quarter_year').distinct().sort()
+             App.report.img_count_months = preprocessedCollection.aggregate_array('yearMonth').distinct().sort();
+             App.report.img_count_iso_weeks = preprocessedCollection.sort('date').aggregate_array('isoWeek_year').distinct();
             
-          print("Parameters:",App.report)
+            print("Parameters:",App.report)
 
             count.evaluate(function (cnt) {
               if (cnt === 0) {
@@ -1394,7 +1569,7 @@ var App = {
                 // Run the processing
 
                  // Cloud masking and void filling process
-                 var gapFilledCollection = App.applyCloudMaskAndFillVoids(imageCollection);
+                 var gapFilledCollection = App.applyCloudMaskAndFillVoids(preprocessedCollection, CollectionForFilling);
                 // Time aggregation
                 App.applyTimeAnalysis(gapFilledCollection);
                 App.ui.forms.updateMessage("Análisis completado. Visualizando resultados…", false);
@@ -1410,7 +1585,7 @@ var App = {
           });
   }
 }),
-   button_download: ui.Button({
+      button_download: ui.Button({
   label: 'Descargar',
   style:{width:'150px'},
   onClick: function () {
@@ -1423,6 +1598,12 @@ var App = {
     
     // Get the list of bands to export based on checkbox selections
     var bandsToExport = App.getDerivedBandNames(App.selectedVars);
+    // 2. Añade manualmente las nuevas bandas de resumen a la lista
+        bandsToExport = bandsToExport.concat(['cloud_mask_summary', 'shadow_mask_summary','pixel_count']);
+
+       print("Bandas a exportar:", bandsToExport);
+
+ 
 
     // Utilizar las colecciones procesadas almacenadas
     var reducedCollectionForExport  = App.processedCollection.select(bandsToExport); // Image or images temporally aggregated 
@@ -1448,13 +1629,53 @@ var App = {
     App.ui.forms.updateMessage("Proceso de descarga iniciado, revise la pestaña Tasks.", false);
   }
 }),
-    link_documentation:ui.Label({
-      value: 'Documentación',
-      targetUrl: "https://github.com/carlosgl91/PINV01-528"
-    })
+      link_documentation:ui.Label({
+        value: 'Documentación',
+        targetUrl: "https://github.com/carlosgl91/PINV01-528"
+      }),
+      // Checkbox para mostrar/ocultar las opciones avanzadas
+      panel_advancedMasking: ui.Panel({
+        widgets: [
+          ui.Label('Umbral de Probabilidad de Nube (%)'),
+          ui.Textbox({
+            value: 50,
+            onChange: function(value) { 
+              var num = Number(value);
+              if (num >= 0 && num <= 100) { 
+                App.ui.forms.updateMessage('Umbral de probabilidad de nubes (%): ' + num, false);
+                App.clouds_shadows_params.CLOUD_PROB_THRESHOLD = num;
+                } else {
+                   App.ui.forms.updateMessage("Umbral de probabilidad invalido, ingrese un valor entre 0 y 100", true);
+                }
+            }
+          }),
+          ui.Label('Umbral NIR para sombras (reflectancia)'),
+          ui.Slider({
+            min: 0.05, max: 0.45, step: 0.01,value:0.15, // SIN 'value:'
+            onChange: function(value) { App.clouds_shadows_params.NIR_DARK_THRESHOLD = value; }
+          }),
+          ui.Label('Distancia de Proyección de sombra (m)'),
+          ui.Slider({
+            min: 10, max: 200, step: 5, value:50, // SIN 'value:'
+            onChange: function(value) { App.clouds_shadows_params.CLOUD_PROJECTION_DIST = value; }
+          })
+        ],
+        style: {
+          shown: false,
+          padding: '0px 8px'
+        }
+      }),
+      checkbox_advancedMasking: ui.Checkbox({
+          label: 'Ajustar parámetros avanzados de enmascaramiento',
+          value: false,
+          onChange: function(checked) {
+            App.ui.forms.panel_advancedMasking.style().set('shown', checked);
+          }
+        })
+    
     }
 
-  },
+  }
 
   /////////////////////////////////////////////////////////////////////////////
 
